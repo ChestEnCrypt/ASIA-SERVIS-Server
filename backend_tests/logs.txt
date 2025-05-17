@@ -1,0 +1,46 @@
+# serverlog
+127.0.0.1 - - [17/May/2025 12:37:27] "POST /signup HTTP/1.1" 409 -
+127.0.0.1 - - [17/May/2025 12:37:27] "GET /signup/checkavailable/login?value=test1747467447@example.com HTTP/1.1" 200 -
+127.0.0.1 - - [17/May/2025 12:37:27] "GET /signup/checkavailable/phone?value=%2B77017467447 HTTP/1.1" 200 -
+127.0.0.1 - - [17/May/2025 12:37:27] "GET /signup/checkavailable/iin?value=001747467447 HTTP/1.1" 200 -
+127.0.0.1 - - [17/May/2025 12:37:27] "POST /login/once HTTP/1.1" 401 -
+127.0.0.1 - - [17/May/2025 12:37:27] "POST /refresh HTTP/1.1" 422 -
+127.0.0.1 - - [17/May/2025 12:37:27] "PATCH /update/login HTTP/1.1" 409 -
+127.0.0.1 - - [17/May/2025 12:37:27] "POST /documents HTTP/1.1" 201 -
+127.0.0.1 - - [17/May/2025 12:37:27] "GET /documents?login=test1747467447@example.com HTTP/1.1" 200 -
+127.0.0.1 - - [17/May/2025 12:37:27] "GET /documents/11?login=test1747467447@example.com HTTP/1.1" 200 -
+
+
+# clientlog
+F...FF..
+======================================================================
+FAIL: test_01_signup (__main__.APITest.test_01_signup)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\azzam\source\repos\ASIA SERVIS - Server\backend_tests\test_main.py", line 30, in test_01_signup
+    self.assertEqual(r.status_code, 201, r.text)
+AssertionError: 409 != 201 : {"iin":false,"login":false,"phone":false}
+
+
+======================================================================
+FAIL: test_05_login_once (__main__.APITest.test_05_login_once)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\azzam\source\repos\ASIA SERVIS - Server\backend_tests\test_main.py", line 60, in test_05_login_once
+    self.assertEqual(r.status_code, 200, r.text)
+AssertionError: 401 != 200 : {"error":"invalid_credentials","login":false}
+
+
+======================================================================
+FAIL: test_06_refresh (__main__.APITest.test_06_refresh)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\azzam\source\repos\ASIA SERVIS - Server\backend_tests\test_main.py", line 72, in test_06_refresh
+    self.assertEqual(r.status_code, 200, r.text)
+AssertionError: 422 != 200 : {"msg":"Not enough segments"}
+
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.038s
+
+FAILED (failures=3)
