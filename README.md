@@ -12,9 +12,7 @@
 |   /signup           | POST       | зарегистрирует пользователя                            | {"login", "phone", "iin"}                          | {"error_type", bool, bool, bool} | {"success", access_tocen, refresh_token}
 |   /verify           | POST       | подтверждает эл. почту через отправку подтверждение    | {"login"}                                          | {bool} # True - подтверждено, False - неподтверждено
 |                     |            |                                                        |                                                    | 
-| /login              |            | вход в личный кобинет                                  |                                                    | 
-|   /once             | POST       | вход на один раз                                       | {"login", "password", "once"}                      | {false, "error_type"} | {true, access_tocen, refresh_token} # оштбка | успех
-|   /longtime         | POST       | долгосрочный вход                                      | {"login", "password", "longtime"} | {access_tocen} | {false, "error_type"} | {true, access_tocen, refresh_token} # оштбка | успех
+| /login              |            | вход в личный кобинет                                  | {"login", "password", "longtime"} | {access_tocen} | {false, "error_type"} | {true, access_tocen, refresh_token} # оштбка | успех
 |                     |            |                                                        |                                                    | 
 | /update             |            | обновить свои данные о пользователе                    |                                                    | 
 |   /login            | POST       | обновить login                                         | {"login", "new_login"}                             | {bool, "error_type"} # True - при успехе | False - при неудаче (+"error_type")

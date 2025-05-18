@@ -12,12 +12,12 @@ SMTP_HOST       = "smtp.gmail.com"
 SMTP_PORT       = 587
 SMTP_USER       = "shohruzazzamkulov@gmail.com"
 SMTP_PASS       = os.getenv("SMTP_PASS", "qyai zkre oykx chns")
-BASE_URL        = "https://example.com/confirm?token=" # example.com надо поменять на действительный адрес
+BASE_URL        = "http://192.168.99.22:5000/signup/verify/confirm?token=" # example.com надо поменять на действительный адрес
 
 # ─── очередь ────────────────────────────────────────────────────────
 @dataclass
 class Task:
-    op: Literal["request", "status", "confirm"]
+    op: Literal["request", "status", "confirm", "cleanup"]
     email: str
     token: Optional[str] = None
     fut: asyncio.Future | None = None
@@ -51,6 +51,9 @@ class MailProducer:
         """Пометить e‑mail подтверждённым по токену из ссылки."""
         return await self._call("confirm", email="", token=token)
 
+    async def cleanup(self, email: str):
+        return await self._call("cleanup", email=email)
+
 # ─── воркер ─────────────────────────────────────────────────────────
 class MailWorker:
     def __init__(self):
@@ -73,6 +76,8 @@ class MailWorker:
                     await self._handle_status(t)
                 elif t.op == "confirm":
                     await self._handle_confirm(t)
+                elif t.op == "cleanup":
+                    await self._handle_cleanup(t)
             finally:
                 self._q.task_done()
 
@@ -109,8 +114,14 @@ class MailWorker:
                "timer": remain,
                "confirmed": int(rec["confirmed"])}
         t.fut.set_result(ans)
-        if rec["confirmed"]:
-            self._cleanup(t.email, rec["token"])
+
+    async def _handle_cleanup(self, t: Task):
+        rec = self._status.get(t.email)
+        if rec is None:
+            t.fut.set_result(None)
+            return
+        self._cleanup(t.email, rec["token"])
+        t.fut.set_result(None)
 
     async def _handle_confirm(self, t: Task):
         email = self._token_map.pop(t.token, None)

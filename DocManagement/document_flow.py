@@ -49,7 +49,7 @@ class Task:
         "get_inbox", "archive", "unarchive",
         "get_versions",
         "add_contact", "get_contacts", "remove_contact",
-        "get_content"
+        "get_content", "add_subdoc"
     ]
     payload: Dict[str, Any]
     fut: asyncio.Future
@@ -96,9 +96,17 @@ class DCProducer:
     async def create_document(self, login: str) -> int:
         return await self._call("create_doc", login=login)
 
-    async def add_document_file(self, login: str, doc_id: int, file_path: str) -> int:
-        return await self._call("add_u_doc", login=login,
+    async def add_document_file(self, login: str, name: str, doc_id: int, file_path: str) -> int:
+        return await self._call("add_u_doc", login=login, name=name,
                                 doc_id=doc_id, file_path=file_path)
+
+    async def add_subdocument(self, login: str, doc_id: int,
+                              name: str, content: str) -> int:
+        return await self._call(
+            "add_subdoc",
+            login=login, doc_id=doc_id,
+            name=name, content=content
+        )
 
     async def update_document_contents(self, login: str, doc_id: int,
                                        new_name: str = "", new_content: str = "", new_status: str =""):
@@ -341,6 +349,25 @@ class DCWorker:
             (t.payload["doc_id"], name, dst))
         await asyncio.to_thread(c.commit)
         t.fut.set_result(cur.lastrowid)
+
+    async def _op_add_subdoc(self, conn, task):
+        # подготовить директорию
+        dst_dir = DIR_DOCS / task.payload["login"] / str(task.payload["doc_id"])
+        dst_dir.mkdir(parents=True, exist_ok=True)
+
+        # сохранить содержимое subdocument как текстовый файл
+        ts = datetime.datetime.utcnow().timestamp()
+        filename = f"{ts}_{task.payload['name']}.txt"
+        path = dst_dir / filename
+        path.write_text(task.payload["content"], encoding="utf-8")
+
+        # добавить запись в таблицу u_documents
+        cur = await asyncio.to_thread(conn.execute,
+            "INSERT INTO u_documents(doc_id, u_doc_name, u_doc_path) VALUES (?,?,?)",
+            (task.payload["doc_id"], task.payload["name"], str(path))
+        )
+        await asyncio.to_thread(conn.commit)
+        task.fut.set_result(cur.lastrowid)
 
     async def _op_upd_doc(self, c, t):
         # сохранение предыдущей версии

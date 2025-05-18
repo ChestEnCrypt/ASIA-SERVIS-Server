@@ -77,19 +77,19 @@ def run_async(coro):
 def check_login():
     val = request.args.get('value', '')
     taken = run_async(db.check_free(login=val))['login']
-    return jsonify(login=not taken), 200
+    return jsonify(login=taken), 200
 
 @app.route('/signup/checkavailable/phone')
 def check_phone():
     val = request.args.get('value', '')
     taken = run_async(db.check_free(phone=val))['phone']
-    return jsonify(phone=not taken), 200
+    return jsonify(phone=taken), 200
 
 @app.route('/signup/checkavailable/iin')
 def check_iin():
     val = request.args.get('value', '')
     taken = run_async(db.check_free(iin=val))['iin']
-    return jsonify(iin=not taken), 200
+    return jsonify(iin=taken), 200
 
 @app.route('/signup', methods=['POST'])
 def signup():
@@ -97,62 +97,78 @@ def signup():
     required = ('login', 'password', 'full_name', 'phone')
     if not all(k in data for k in required):
         return jsonify(error='missing_fields'), 400
-    # conflict if any field already exists
+
+    # conflict if fields taken
     status = run_async(db.check_free(
         login=data['login'], phone=data['phone'], iin=data.get('iin','')
     ))
     if any(status.values()):
-        # return which fields taken
-        # invert for client: True means available
+        # invert: True=available, False=taken
         return jsonify({k: not v for k,v in status.items()}), 409
-    # create user
+
+    run_async(mail.cleanup(data['login']))
+
+    # поля свободны — создаём пользователя
     user_id = run_async(db.add_user(
         login=data['login'], password=data['password'],
         full_name=data['full_name'], phone=data['phone'],
         role=data.get('role',''), iin=data.get('iin','')
     ))
-    mail.email_confirm(data['login'])
-    access = create_access_token(identity=user_id)
-    refresh = create_refresh_token(identity=user_id)
+    access = create_access_token(identity=str(user_id))
+    refresh = create_refresh_token(identity=str(user_id))
     tok = decode_token(refresh)
-    run_async(rt.add_refresh_token(user_id, tok['jti'], tok['exp']))
+    run_async(rt.add_refresh_token(str(user_id), tok['jti'], tok['exp']))
+
     return jsonify(login=True, access_token=access, refresh_token=refresh), 201
 
 @app.route('/signup/verify', methods=['POST'])
 def signup_verify():
     data = request.get_json() or {}
-    ok = run_async(db.confirm_email(data.get('login','')))
-    return jsonify(confirmed=bool(ok)), 200
+    login = data.get('login', '')
+    if not login:
+        return jsonify({"error": "login required"}), 400
+
+    ok = run_async(mail.email_confirm(login))
+    return jsonify(ok), 200
+
+@app.route('/signup/verify/check', methods=['POST'])
+def signup_verify_check():
+    data = request.get_json() or {}
+    login = data.get('login', '')
+    if not login:
+        return jsonify({"error": "login required"}), 400
+
+    e_con = run_async(mail.is_confirm(login))
+
+    return jsonify(e_con), 200
+
+@app.route('/signup/verify/confirm', methods=['GET'])  # если через ссылку
+def signup_verify_confirm():
+    token = request.args.get('token', '')
+    if not token:
+        return jsonify({"error": "Missing token"}), 400
+
+    ok = run_async(mail.mark_confirmed(token))
+    if not ok:
+        return jsonify({"error": "Invalid or expired token"}), 400
+
+    return jsonify({"message": "Email confirmed!"}), 200
 
 
 # ──────────────────────── Login / refresh ─────────────────────────
 # login once
-@app.route('/login/once', methods=['POST'])
+@app.route('/login', methods=['POST'])
 def login_once():
     data = request.get_json() or {}
     user = run_async(db.auth(data.get('login'), data.get('password')))
     if not user:
         return jsonify(login=False), 401
-    access = create_access_token(identity=user)
-    refresh = create_refresh_token(identity=user)
+    # ensure identity as string
+    access = create_access_token(identity=str(user))
+    refresh = create_refresh_token(identity=str(user))
     tok = decode_token(refresh)
-    run_async(rt.add_refresh_token(user, tok['jti'], tok['exp']))
+    run_async(rt.add_refresh_token(str(user), tok['jti'], tok['exp']))
     return jsonify(login=True, access_token=access, refresh_token=refresh), 200
-
-@app.route('/login/longtime', methods=['POST'])
-def login_longtime():
-    data = request.get_json() or {}
-    user = run_async(db.auth(data.get('login'), data.get('password')))
-    if not user:
-        return jsonify(login=False, error='invalid_credentials'), 401
-    access = create_access_token(identity=user)
-    refresh = create_refresh_token(identity=user)
-    token_data = decode_token(refresh)
-    run_async(rt.add_refresh_token(
-        user, token_data['jti'], token_data['exp']
-    ))
-    return jsonify(login=True, access_token=access,
-                   refresh_token=refresh), 200
 
 @app.route('/refresh', methods=['POST'])
 @jwt_required(refresh=True)
@@ -160,7 +176,7 @@ def refresh_token():
     uid = get_jwt_identity()
     tok_hdr = request.headers.get('Authorization','').split()[-1]
     tok = decode_token(tok_hdr)
-    if run_async(rt.is_token_revoked(tok['jti'], uid)):
+    if run_async(rt.is_token_revoked(tok['jti'])):
         return jsonify(error='revoked'), 401
     new_access = create_access_token(identity=uid)
     return jsonify(access_token=new_access), 200
@@ -174,7 +190,7 @@ def update_login():
     taken = run_async(db.check_free(login=data.get('new_login')))['login']
     if taken:
         return jsonify(login=False, error='taken'), 409
-    run_async(db.set_login(data.get('login'), data.get('new_login')))  #
+    run_async(db.set_login(data.get('login'), data.get('new_login')))
     return jsonify(login=True), 200
 
 # update password
@@ -184,13 +200,13 @@ def update_password():
     run_async(db.update_password(data.get('login'), data.get('new_password')))
     return jsonify(password=True), 200
 
-# update phone\m@app.route('/update/phone', methods=['PATCH'])
+@app.route('/update/phone', methods=['PATCH'])
 def update_phone():
     data = request.get_json() or {}
     taken = run_async(db.check_free(phone=data.get('new_phone')))['phone']
     if taken:
         return jsonify(phone=False, error='taken'), 409
-    run_async(db.update_phone(data.get('login'), data.get('new_phone')))
+    run_async(db.update_info(login=data.get('login'), phone=data.get('new_phone')))
     return jsonify(phone=True), 200
 
 @app.route('/update/role', methods=['PATCH'])
@@ -225,19 +241,19 @@ def delete_account():
 @app.route('/contacts', methods=['POST'])
 def add_contact():
     data = request.get_json() or {}
-    cid = run_async(db.add_contact(data.get('login'), data.get('contact')))
+    cid = run_async(dc.add_contact(data.get('login'), data.get('contact')))
     return jsonify(con_id=cid), 201
 
 @app.route('/contacts', methods=['GET'])
 def list_contacts():
     lg = request.args.get('login','')
-    res = run_async(db.get_contacts(lg))
+    res = run_async(dc.get_contacts(lg))
     return jsonify(res), 200
 
 @app.route('/contacts/<int:con_id>', methods=['DELETE'])
 def remove_contact(con_id):
     lg = request.args.get('login','')
-    ok = run_async(db.remove_contact(lg, con_id))
+    ok = run_async(dc.remove_contact(lg, con_id))
     return jsonify(removed=bool(ok)), 200
 
 
@@ -254,20 +270,26 @@ def get_document(doc_id):
     res = run_async(dc.get_document_content(lg, doc_id))
     return jsonify(res), 200
 
-@app.route('/documents/<int:doc_id>/files', methods=['POST'])
-def upload_doc_file(doc_id):
-    login = request.form.get('login','')
-    if 'file' not in request.files:
-        return jsonify(error='no_file'), 400
-    f = request.files['file']
-    filename = secure_filename(f.filename)
-    dest = os.path.join(UPLOAD_DOCS, login, str(doc_id))
-    os.makedirs(dest, exist_ok=True)
-    path = os.path.join(dest, filename)
-    f.save(path)
-    # Предполагаем, что DCProducer у тебя реализует add_document_file(login, doc_id, path)
-    u_doc_id = run_async(dc.add_document_file(login, doc_id, path))
-    return jsonify(u_doc_id=u_doc_id), 201
+@app.route('/documents/<int:doc_id>/files', methods=['POST', 'GET'])
+def documents_files(doc_id):
+    # POST – загрузить файл
+    if request.method == 'POST':
+        login = request.form.get('login','')
+        if 'file' not in request.files:
+            return jsonify(error='no_file'), 400
+        f = request.files['file']
+        filename = secure_filename(f.filename)
+        dest = os.path.join(UPLOAD_DOCS, login, str(doc_id))
+        os.makedirs(dest, exist_ok=True)
+        path = os.path.join(dest, filename)
+        f.save(path)
+        u_doc_id = run_async(dc.add_document_file(login, filename, doc_id, path))
+        return jsonify(u_doc_id=u_doc_id), 201
+
+    # GET – вернуть список всех файлов для doc_id
+    login = request.args.get('login','')
+    files_list = run_async(dc.get_document_files(login, doc_id))
+    return jsonify(files_list), 200
 
 @app.route('/documents', methods=['POST'])
 def create_document():
@@ -295,26 +317,43 @@ def update_document(doc_id):
 
 @app.route('/documents/<int:doc_id>/subdocuments', methods=['POST'])
 def add_subdocument(doc_id):
-    data = request.get_json() or {}
-    sub_id = run_async(dc.add_subdocument(
-        login=data.get('login'), doc_id=doc_id,
-        name=data.get('name',''), content=data.get('content','')
-    ))
-    return jsonify(subdocument_id=sub_id), 201
+    # Если пришёл JSON – создаём «метадокумент»
+    if request.is_json:
+        data = request.get_json() or {}
+        u_doc_id = run_async(dc.add_subdocument(
+            login=data.get('login',''),
+            doc_id=doc_id,
+            name=data.get('name',''),
+            content=data.get('content','')
+        ))
+        return jsonify(subdocument_id=u_doc_id), 201
 
-@app.route('/documents/<int:doc_id>/subdocuments/<int:sub_id>', methods=['PATCH'])
-def update_subdocument(doc_id, sub_id):
+    # Иначе – multipart upload файл-поддокумента
+    login = request.form.get('login','')
+    if 'file' not in request.files:
+        return jsonify(error='no_file'), 400
+    f = request.files['file']
+    filename = secure_filename(f.filename)
+    dest = os.path.join(UPLOAD_DOCS, login, str(doc_id))
+    os.makedirs(dest, exist_ok=True)
+    file_path = os.path.join(dest, filename)
+    f.save(file_path)
+    u_doc_id = run_async(dc.add_document_file(login, doc_id, file_path))
+    return jsonify(subdocument_id=u_doc_id), 201
+
+@app.route('/documents/<int:doc_id>/subdocuments/<int:u_doc_id>', methods=['PATCH'])
+def update_subdocument(doc_id, u_doc_id):
     data = request.get_json() or {}
-    run_async(dc.set_subdocument_name(
+    run_async(dc.update_u_document_contents(
         login=data.get('login'), doc_id=doc_id,
-        sub_id=sub_id, new_name=data.get('name','')
+        u_doc_id=u_doc_id, new_name=data.get('name','')
     ))
     return jsonify(updated=True), 200
 
-@app.route('/documents/<int:doc_id>/subdocuments/<int:sub_id>', methods=['DELETE'])
-def remove_subdocument(doc_id, sub_id):
+@app.route('/documents/<int:doc_id>/subdocuments/<int:u_doc_id>', methods=['DELETE'])
+def remove_subdocument(doc_id, u_doc_id):
     lg = request.args.get('login','')
-    ok = run_async(dc.remove_subdocument(lg, doc_id, sub_id))
+    ok = run_async(dc.remove_u_document(lg, doc_id, u_doc_id))
     return jsonify(deleted=bool(ok)), 200
 
 @app.route('/documents/<int:doc_id>', methods=['DELETE'])
@@ -363,7 +402,7 @@ def get_inbox_document(inb_id):
 def add_comment():
     data = request.get_json() or {}
     com_id = run_async(dc.add_document_comment(
-        login=data.get('login'), doc_id=data.get('doc_id'), content=data.get('content','')
+        login=data.get('login'), author=data.get("author"), doc_id=data.get('doc_id'), comment=data.get('content','')
     ))
     return jsonify(comment_id=com_id), 201
 
@@ -378,7 +417,7 @@ def list_comments():
 def update_comment(com_id):
     data = request.get_json() or {}
     ok = run_async(dc.update_document_comment(
-        login=data.get('login'), comment_id=com_id, new_content=data.get('content','')
+        login=data.get('login'), comment_id=com_id, new_comment=data.get('content','')
     ))
     return jsonify(updated=bool(ok)), 200
 

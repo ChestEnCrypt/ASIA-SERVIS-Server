@@ -22,10 +22,7 @@ class Task:
 class RTProducer:
     def __init__(self):
         self._q = _QUEUE
-        try:
-            self._loop = asyncio.get_running_loop()
-        except Exception as e:
-            pass
+        self._loop = asyncio.get_event_loop()
 
     async def _call(self, op: str, **kw):
         fut = self._loop.create_future()

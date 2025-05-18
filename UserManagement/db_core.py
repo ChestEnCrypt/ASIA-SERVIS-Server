@@ -17,7 +17,7 @@ def get_queue() -> asyncio.Queue:
 @dataclass
 class Task:
 	op: Literal[
-		"add", "get", "del", "set_role", "upd_pwd", "upd_contacts",
+		"add", "get", "del", "set_role", "upd_pwd", "upd_info",
 		"check", "auth", "backup", "confirm_email", "confirm_phone",
 		"request_pwd_reset", "reset_password", "unblock", "get_uuid",
 		"set_login"
@@ -54,17 +54,17 @@ class DBProducer:
 		return await self._call("set_role", login=login, role=role)
 	
 	async def set_login(self, login: str, new_login: str):
-		return self._call("set_login", login=login, new_login=new_login)
+		return await self._call("set_login", login=login, new_login=new_login)
 
 	async def update_password(self, login: str, new_password: str):
 		pw_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
 		return await self._call("upd_pwd", login=login, pwd=pw_hash)
 
-	async def update_contacts(self, login: str, *,
+	async def update_info(self, login: str, *,
 							  phone: Optional[str] = None,
 							  iin: Optional[str] = None,
 							  full_name: Optional[str] = None):
-		return await self._call("upd_contacts", login=login,
+		return await self._call("upd_info", login=login,
 								phone=phone, iin=iin, full_name=full_name)
 
 	async def check_free(self, *, login=None, phone=None, iin=None):
@@ -204,7 +204,7 @@ class DBWorker:
 		await asyncio.to_thread(c.commit)
 		t.fut.set_result(True)
 
-	async def _op_upd_contacts(self, c, t):
+	async def _op_upd_info(self, c, t):
 		sets, params = [], []
 		for k in ("phone", "iin", "full_name"):
 			v = t.payload.get(k)
