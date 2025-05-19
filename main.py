@@ -1,4 +1,5 @@
 import os
+import base64
 import asyncio
 import threading
 from flask import Flask, request, jsonify, send_from_directory
@@ -76,19 +77,19 @@ def run_async(coro):
 @app.route('/signup/checkavailable/login')
 def check_login():
     val = request.args.get('value', '')
-    taken = run_async(db.check_free(login=val))['login']
+    taken = run_async(db.check_free(login=val)).get('login')
     return jsonify(login=taken), 200
 
 @app.route('/signup/checkavailable/phone')
 def check_phone():
     val = request.args.get('value', '')
-    taken = run_async(db.check_free(phone=val))['phone']
+    taken = run_async(db.check_free(phone=val)).get('phone')
     return jsonify(phone=taken), 200
 
 @app.route('/signup/checkavailable/iin')
 def check_iin():
     val = request.args.get('value', '')
-    taken = run_async(db.check_free(iin=val))['iin']
+    taken = run_async(db.check_free(iin=val)).get('iin')
     return jsonify(iin=taken), 200
 
 @app.route('/signup', methods=['POST'])
@@ -105,6 +106,9 @@ def signup():
     if any(status.values()):
         # invert: True=available, False=taken
         return jsonify({k: not v for k,v in status.items()}), 409
+
+    if not run_async(mail.is_confirm(data['login'])):
+        return jsonify(login=False, error="Логин не подтвержден")
 
     run_async(mail.cleanup(data['login']))
 
@@ -127,9 +131,11 @@ def signup_verify():
     login = data.get('login', '')
     if not login:
         return jsonify({"error": "login required"}), 400
+    elif '@' not in login:
+        return jsonify({"error": "incorrect login"}), 400
 
     ok = run_async(mail.email_confirm(login))
-    return jsonify(ok), 200
+    return jsonify({'success': ok}), 200
 
 @app.route('/signup/verify/check', methods=['POST'])
 def signup_verify_check():
@@ -240,20 +246,21 @@ def delete_account():
 # ───────────────────────── Contacts ─────────────────────────
 @app.route('/contacts', methods=['POST'])
 def add_contact():
-    data = request.get_json() or {}
-    cid = run_async(dc.add_contact(data.get('login'), data.get('contact')))
+    data = request.get_json(silent=True) or {}
+    cid = run_async(dc.add_contact(login=data.get('login'), name=data.get('name'), contact=data.get('contact')))
     return jsonify(con_id=cid), 201
 
 @app.route('/contacts', methods=['GET'])
 def list_contacts():
-    lg = request.args.get('login','')
-    res = run_async(dc.get_contacts(lg))
+    data = request.get_json(silent=True) or {}
+    res = run_async(dc.get_contacts(data.get('login')))
     return jsonify(res), 200
 
 @app.route('/contacts/<int:con_id>', methods=['DELETE'])
 def remove_contact(con_id):
-    lg = request.args.get('login','')
-    ok = run_async(dc.remove_contact(lg, con_id))
+    data = request.get_json(silent=True) or {}
+    print("remove contact", data)
+    ok = run_async(dc.remove_contact(data.get('login'), con_id))
     return jsonify(removed=bool(ok)), 200
 
 
@@ -269,6 +276,34 @@ def get_document(doc_id):
     lg = request.args.get('login','')
     res = run_async(dc.get_document_content(lg, doc_id))
     return jsonify(res), 200
+
+@app.route('/documents/<int:doc_id>/defiles', methods=['GET'])
+def documents_defiles(doc_id):
+    # GET – вернуть список всех файлов для doc_id
+    login = request.args.get('login','')
+    # получаем первоначальный список из DCProducer
+    files_list = run_async(dc.get_document_files(login, doc_id))
+
+    result = {}
+    for fid, info in files_list.items():
+        name = info['u_doc_name']
+        path = info['u_doc_path']
+        try:
+            # получаем зашифрованные байты и расшифровываем
+            raw = run_async(dc.decrypt_file(path))   # ← bytes
+            # кодируем в строку Base64
+            b64 = base64.b64encode(raw).decode('ascii')
+            result[fid] = {
+                'u_doc_name': name,
+                'u_doc_file': b64
+            }
+        except Exception as e:
+            result[fid] = {
+                'u_doc_name': name,
+                'error': str(e)
+            }
+
+    return jsonify(result), 200
 
 @app.route('/documents/<int:doc_id>/files', methods=['POST', 'GET'])
 def documents_files(doc_id):
@@ -315,6 +350,16 @@ def update_document(doc_id):
     ))
     return jsonify(updated=True), 200
 
+@app.route('/documents/remove/<int:doc_id>', methods=['PATCH'])
+def remove_document(doc_id):
+    data = request.get_json(force=True) or {}
+    login = data.get('login')
+    if not login:
+        return jsonify(error='login required'), 400
+
+    ok = run_async(dc.remove_documents(login=login, doc_id=doc_id))
+    return jsonify(updated=bool(ok)), 200
+
 @app.route('/documents/<int:doc_id>/subdocuments', methods=['POST'])
 def add_subdocument(doc_id):
     # Если пришёл JSON – создаём «метадокумент»
@@ -326,7 +371,7 @@ def add_subdocument(doc_id):
             name=data.get('name',''),
             content=data.get('content','')
         ))
-        return jsonify(subdocument_id=u_doc_id), 201
+        return jsonify(u_doc_id=u_doc_id), 201
 
     # Иначе – multipart upload файл-поддокумента
     login = request.form.get('login','')
@@ -338,8 +383,8 @@ def add_subdocument(doc_id):
     os.makedirs(dest, exist_ok=True)
     file_path = os.path.join(dest, filename)
     f.save(file_path)
-    u_doc_id = run_async(dc.add_document_file(login, doc_id, file_path))
-    return jsonify(subdocument_id=u_doc_id), 201
+    u_doc_id = run_async(dc.add_document_file(login, filename, doc_id, file_path))
+    return jsonify(u_doc_id=u_doc_id), 201
 
 @app.route('/documents/<int:doc_id>/subdocuments/<int:u_doc_id>', methods=['PATCH'])
 def update_subdocument(doc_id, u_doc_id):
@@ -359,14 +404,15 @@ def remove_subdocument(doc_id, u_doc_id):
 @app.route('/documents/<int:doc_id>', methods=['DELETE'])
 def delete_document(doc_id):
     lg = request.args.get('login','')
-    ok = run_async(dc.delete_document(lg, doc_id))
+    ok = run_async(dc.remove_documents(lg, doc_id))
     return jsonify(deleted=bool(ok)), 200
 
 @app.route('/documents/<int:doc_id>/sendto', methods=['POST'])
 def send_document(doc_id):
     data = request.get_json() or {}
+    print(data)
     inb_id = run_async(dc.send_document(
-        login=data.get('login'), to_login=data.get('to_login'), doc_id=doc_id
+        author=data.get('author'), send_to=data.get('send_to'), doc_id=doc_id
     ))
     return jsonify(inbox_id=inb_id), 200
 
@@ -374,8 +420,9 @@ def send_document(doc_id):
 # ───────────────────────── Inbox ─────────────────────────
 @app.route('/inbox', methods=['GET'])
 def list_inbox():
-    lg = request.args.get('login','')
-    res = run_async(dc.get_inbox(lg))
+    lg = request.get_json(silent=True)
+    print("lg", lg)
+    res = run_async(dc.get_inbox(lg.get('login')))
     return jsonify(res), 200
 
 @app.route('/inbox/<int:inb_id>/archive', methods=['POST'])

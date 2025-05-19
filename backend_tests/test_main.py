@@ -20,6 +20,7 @@ class APITest(unittest.TestCase):
         url = f"{BASE_URL}/signup/verify"
         payload = {'login': self.login}
         r = requests.post(url, json=payload)
+        print(r.json())
         self.assertEqual(r.status_code, 200)
 
     def test_02_check_email_confirm(self):
@@ -67,6 +68,9 @@ class APITest(unittest.TestCase):
         r = requests.post(url, json=payload)
         self.assertEqual(r.status_code, 201, r.text)
         data = r.json()
+
+        print(data)
+
         self.assertTrue(data.get('login'))
         self.assertIn('access_token', data)
         self.assertIn('refresh_token', data)
@@ -94,7 +98,7 @@ class APITest(unittest.TestCase):
         data = r.json()
         self.assertTrue(data.get('iin'))
 
-    def test_07_login_once(self):
+    def test_07_login(self):
         url = f"{BASE_URL}/login"
         payload = {'login': self.login, 'password': self.password}
         r = requests.post(url, json=payload)

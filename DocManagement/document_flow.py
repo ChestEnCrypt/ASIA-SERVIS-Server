@@ -123,9 +123,12 @@ class DCProducer:
 
     async def remove_u_document(self, login: str, doc_id: int, u_doc_id: int):
         return await self._call("rm_u_doc", login=login, doc_id=doc_id, u_doc_id=u_doc_id)
-    
+
     async def get_document_content(self, login: str, doc_id: int) -> Dict[str, Any]:
         return await self._call("get_content", login=login, doc_id=doc_id)
+
+    async def decrypt_file(self, enc_path: str) -> Dict[str, Any]:
+        return await self._call("decrypt_file", enc_path=enc_path)
 
     # комментарии
     async def add_document_comment(self, login: str, author: str,
@@ -176,8 +179,8 @@ class DCProducer:
         return await self._call("unarchive", login=login, inb_id=inb_id)
 
     # контакты
-    async def add_contact(self, login: str, contact: str) -> int:
-        return await self._call("add_contact", login=login, contact=contact)
+    async def add_contact(self, login: str, name: str, contact: str) -> int:
+        return await self._call("add_contact", login=login, name=name, contact=contact)
 
     async def get_contacts(self, login: str) -> Dict[int, str]:
         return await self._call("get_contacts", login=login)
@@ -263,6 +266,7 @@ class DCWorker:
         CREATE TABLE IF NOT EXISTS contacts(
           con_id INTEGER PRIMARY KEY AUTOINCREMENT,
           login TEXT,
+          name TEXT,
           contact TEXT
         );""")
 
@@ -291,7 +295,18 @@ class DCWorker:
         return str(dst)
 
     def _decrypt(self, enc_path: str) -> bytes:
-        return Fernet(FERNET._signing_key).decrypt(Path(enc_path).read_bytes())
+        data_enc = Path(enc_path).read_bytes()
+        return FERNET.decrypt(data_enc)
+
+    async def _op_decrypt_file(self, c, t):
+        # извлекаем путь из payload
+        enc_path = t.payload.get('enc_path')
+        # читаем зашифрованные байты
+        data_enc = Path(enc_path).read_bytes()
+        # расшифровываем тем же экземпляром FERNET (инициализированным из base64-ключа)
+        plaintext = FERNET.decrypt(data_enc)
+        # возвращаем bytes как результат задачи
+        t.fut.set_result(plaintext)
 
     # операции
     async def _op_add_cert(self, c, t):
@@ -439,15 +454,11 @@ class DCWorker:
 
     async def _op_get_content(self, c, t):
         cur = await asyncio.to_thread(c.execute,
-            "SELECT doc_name, content, create_date, edited_date, status"
-            " FROM documents WHERE login=? AND doc_id=?",
-            (t.payload["login"], t.payload["doc_id"]))
-        row = cur.fetchone()
-        if not row:
-            t.fut.set_result({})
-        else:
-            keys = ["doc_name", "content", "create_date", "edited_date", "status"]
-            t.fut.set_result({k: row[i] for i, k in enumerate(keys)})
+            "SELECT doc_id,doc_name,content,create_date,edited_date,status FROM documents WHERE login=?",
+            (t.payload["login"],))
+        rows = cur.fetchall()
+        res = {r[0]: {"doc_name": r[1], "content": r[2], "create_date": r[3], "edited_date": r[4], "status": r[5]} for r in rows}
+        t.fut.set_result(res)
 
     async def _op_add_comment(self, c, t):
         now = datetime.datetime.utcnow().isoformat()
@@ -473,10 +484,10 @@ class DCWorker:
 
     async def _op_get_docs(self, c, t):
         cur = await asyncio.to_thread(c.execute,
-            "SELECT doc_id,doc_name,content FROM documents WHERE login=?",
+            "SELECT doc_id,doc_name,content,create_date,edited_date,status FROM documents WHERE login=?",
             (t.payload["login"],))
         rows = cur.fetchall()
-        res = {r[0]: {"doc_name": r[1], "content": r[2]} for r in rows}
+        res = {r[0]: {"doc_name": r[1], "content": r[2], "create_date": r[3], "edited_date": r[4], "status": r[5]} for r in rows}
         t.fut.set_result(res)
 
     async def _op_get_u_docs(self, c, t):
@@ -545,11 +556,48 @@ class DCWorker:
         t.fut.set_result(cur.lastrowid)
 
     async def _op_get_inbox(self, c, t):
-        cur = await asyncio.to_thread(c.execute,
-            "SELECT inb_id,author,doc_id,signed,archived FROM inbox WHERE login=?", 
-            (t.payload["login"],))
-        rows = cur.fetchall()
-        res = {r[0]: {"author": r[1], "doc_id": r[2], "signed": bool(r[3]), "archived": bool(r[4])} for r in rows}
+        login = t.payload.get('login', '')
+
+        # Сначала загружаем все документы пользователя
+        cur_docs = await asyncio.to_thread(
+            c.execute,
+            "SELECT doc_id, doc_name, content, create_date, edited_date, status "
+            "FROM documents WHERE login=?",
+            (login,)
+        )
+        doc_rows = await asyncio.to_thread(cur_docs.fetchall)
+        # Формируем словарь документов: {doc_id: {…}}
+        documents = {
+            r[0]: {
+                "doc_name":    r[1],
+                "content":     r[2],
+                "create_date": r[3],
+                "edited_date": r[4],
+                "status":      r[5],
+            }
+            for r in doc_rows
+        }
+
+        # Теперь получаем входящие
+        cur = await asyncio.to_thread(
+            c.execute,
+            "SELECT inb_id, author, doc_id, signed, archived FROM inbox WHERE login=?",
+            (login,)
+        )
+        rows = await asyncio.to_thread(cur.fetchall)
+
+        # Собираем окончательный результат, включая вложенный документ
+        res = {
+            r[0]: {
+                "author":   r[1],
+                "doc_id":   r[2],
+                "signed":   bool(r[3]),
+                "archived": bool(r[4]),
+                "doc":      documents.get(r[2], {})
+            }
+            for r in rows
+        }
+
         t.fut.set_result(res)
 
     async def _op_archive(self, c, t):
@@ -566,21 +614,29 @@ class DCWorker:
 
     # операции контактов
     async def _op_add_contact(self, c, t):
-        cur = await asyncio.to_thread(c.execute,
-            "INSERT INTO contacts(login, contact) VALUES(?,?)",
-            (t.payload["login"], t.payload["contact"]))
+        cur = await asyncio.to_thread(c.execute, # "INSERT INTO u_documents(doc_id, u_doc_name, u_doc_path) VALUES (?,?,?)",
+            "INSERT INTO contacts(login, name, contact) VALUES (?,?,?)",
+            (t.payload["login"], t.payload["name"], t.payload["contact"]))
         await asyncio.to_thread(c.commit)
         t.fut.set_result(cur.lastrowid)
 
     async def _op_get_contacts(self, c, t):
-        cur = await asyncio.to_thread(c.execute,
-            "SELECT con_id, contact FROM contacts WHERE login=?",
-            (t.payload["login"],))
-        rows = cur.fetchall()
-        res = {r[0]: r[1] for r in rows}
+        login = t.payload.get('login')
+        # выполняем запрос
+        cur = await asyncio.to_thread(
+            c.execute,
+            "SELECT con_id, name, contact FROM contacts WHERE login=?",
+            (login,)
+        )
+        # получаем все строки
+        rows = await asyncio.to_thread(cur.fetchall)
+        print(f"[DEBUG] Rows fetched: {rows!r}")
+        # строим результат
+        res = {r[0]: {'name': r[1], 'contact': r[2]} for r in rows}
         t.fut.set_result(res)
 
     async def _op_remove_contact(self, c, t):
+        print(f"[DEBUG] Getting contacts for login={t.payload["login"],!r}")
         await asyncio.to_thread(c.execute,
             "DELETE FROM contacts WHERE login=? AND con_id=?",
             (t.payload["login"], t.payload["con_id"]))

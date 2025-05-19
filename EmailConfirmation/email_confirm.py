@@ -12,7 +12,7 @@ SMTP_HOST       = "smtp.gmail.com"
 SMTP_PORT       = 587
 SMTP_USER       = "shohruzazzamkulov@gmail.com"
 SMTP_PASS       = os.getenv("SMTP_PASS", "qyai zkre oykx chns")
-BASE_URL        = "http://192.168.99.22:5000/signup/verify/confirm?token=" # example.com надо поменять на действительный адрес
+BASE_URL        = "http://192.168.188.13:5000/signup/verify/confirm?token=" # example.com надо поменять на действительный адрес
 
 # ─── очередь ────────────────────────────────────────────────────────
 @dataclass
@@ -159,6 +159,7 @@ class MailWorker:
                 await smtp.send_message(msg)
             except Exception as e:
                 print("SMTP error:", e)
+                return "not sent"
         await smtp.quit()
 
     def _build_message(self, email: str, token: str) -> EmailMessage:
