@@ -14,6 +14,11 @@ from UserManagement.refresh_token_core import RTWorker, RTProducer
 from DocManagement.document_flow import DCWorker, DCProducer
 from EmailConfirmation.email_confirm import MailWorker, MailProducer
 
+from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives import hashes
+from cryptography.exceptions import InvalidSignature
+
 # ─────────────────────────── config ───────────────────────────
 app = Flask(__name__)
 app.config.update(
@@ -259,7 +264,6 @@ def list_contacts():
 @app.route('/contacts/<int:con_id>', methods=['DELETE'])
 def remove_contact(con_id):
     data = request.get_json(silent=True) or {}
-    print("remove contact", data)
     ok = run_async(dc.remove_contact(data.get('login'), con_id))
     return jsonify(removed=bool(ok)), 200
 
@@ -342,16 +346,27 @@ def create_document():
 @app.route('/documents/<int:doc_id>', methods=['PATCH'])
 def update_document(doc_id):
     data = request.get_json() or {}
-    run_async(dc.update_document_contents(
-        login=data.get('login'), doc_id=doc_id,
-        new_name=data.get('name',''),
-        new_content=data.get('content',''),
-        new_status=data.get('status','')
-    ))
-    return jsonify(updated=True), 200
+    check = run_async(dc.get_documents(data.get('login')))
+
+    if check[doc_id]['status'] != 10:
+        run_async(dc.update_document_contents(
+            login=data.get('login'), doc_id=doc_id,
+            new_name=data.get('name'),
+            new_content=data.get('content'),
+            new_status=data.get('status')
+        ))
+        return jsonify(updated=True), 200
+    else :
+        return jsonify(updated=False, error="нет разрешения"), 403
 
 @app.route('/documents/remove/<int:doc_id>', methods=['PATCH'])
 def remove_document(doc_id):
+    login = request.get_json().get('login','')
+    check = run_async(dc.get_documents(login))
+
+    if check[doc_id]['status'] == 10:
+        return jsonify(error='Нет разрешение'), 403
+
     data = request.get_json(force=True) or {}
     login = data.get('login')
     if not login:
@@ -362,6 +377,12 @@ def remove_document(doc_id):
 
 @app.route('/documents/<int:doc_id>/subdocuments', methods=['POST'])
 def add_subdocument(doc_id):
+    login = request.form.get('login','')
+    check = run_async(dc.get_documents(login))
+
+    if check[doc_id]['status'] == 10:
+        return jsonify(error='Нет разрешение'), 403
+
     # Если пришёл JSON – создаём «метадокумент»
     if request.is_json:
         data = request.get_json() or {}
@@ -374,7 +395,6 @@ def add_subdocument(doc_id):
         return jsonify(u_doc_id=u_doc_id), 201
 
     # Иначе – multipart upload файл-поддокумента
-    login = request.form.get('login','')
     if 'file' not in request.files:
         return jsonify(error='no_file'), 400
     f = request.files['file']
@@ -397,7 +417,12 @@ def update_subdocument(doc_id, u_doc_id):
 
 @app.route('/documents/<int:doc_id>/subdocuments/<int:u_doc_id>', methods=['DELETE'])
 def remove_subdocument(doc_id, u_doc_id):
-    lg = request.args.get('login','')
+    lg = request.get_json()['login']
+    check = run_async(dc.get_documents(lg))
+
+    if check[doc_id]['status'] == 10:
+        return jsonify(error='Нет разрешение'), 403
+
     ok = run_async(dc.remove_u_document(lg, doc_id, u_doc_id))
     return jsonify(deleted=bool(ok)), 200
 
@@ -410,7 +435,6 @@ def delete_document(doc_id):
 @app.route('/documents/<int:doc_id>/sendto', methods=['POST'])
 def send_document(doc_id):
     data = request.get_json() or {}
-    print(data)
     inb_id = run_async(dc.send_document(
         author=data.get('author'), send_to=data.get('send_to'), doc_id=doc_id
     ))
@@ -421,7 +445,6 @@ def send_document(doc_id):
 @app.route('/inbox', methods=['GET'])
 def list_inbox():
     lg = request.get_json(silent=True)
-    print("lg", lg)
     res = run_async(dc.get_inbox(lg.get('login')))
     return jsonify(res), 200
 
@@ -478,29 +501,81 @@ def delete_comment(com_id):
 # ─────── Signatures & Certificates ───────────────────────
 @app.route('/sign/send/sigfile', methods=['POST'])
 def upload_signature():
-    login = request.form.get('login','')
-    doc_id = request.form.get('doc_id', type=int)
-    u_doc_id = request.form.get('u_doc_id', type=int)
+    login   = request.form.get('login', '')
+    author   = request.form.get('author', '')
+    doc_id  = request.form.get('doc_id', type=int)
+    u_doc_id= request.form.get('u_doc_id', type=int)
+
     if 'sigfile' not in request.files:
         return jsonify(error='no_file'), 400
-    f = request.files['sigfile']
-    filename = secure_filename(f.filename)
-    path = os.path.join(UPLOAD_SIGS, filename)
-    f.save(path)
-    sig_id = run_async(dc.sign_document(login, doc_id, u_doc_id, path))
+
+    sig_file = request.files['sigfile']
+    signature = sig_file.read()
+
+    # получить путь к сертификату пользователя
+    cert_info = run_async(dc.get_user_certificates(login))
+    cert_path = list(cert_info.values())[0]['cer_path']
+    if not cert_path or not os.path.exists(os.getcwd() + '/' + cert_path):
+        return jsonify(error='certificate_not_found'), 404
+
+    # загрузить публичный ключ из сертификата
+    cert_bytes = open(cert_path, 'rb').read()
+    cert = x509.load_pem_x509_certificate(cert_bytes)
+    public_key = cert.public_key()
+
+    # получить путь к оригинальному файлу
+    doc = run_async(dc.get_document_files(login, doc_id))
+    doc_path = doc[u_doc_id]['u_doc_path']
+    if not doc_path or not os.path.exists(doc_path):
+        return jsonify(error='document_not_found'), 404
+    raw = run_async(dc.decrypt_file(doc_path))
+
+    # проверить подпись
+    try:
+        public_key.verify(
+            signature,
+            raw,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+    except InvalidSignature:
+        return jsonify(error='signature_verification_failed'), 400
+
+    # сохраняем файл подписи
+    filename = secure_filename(sig_file.filename)
+    os.makedirs(UPLOAD_SIGS, exist_ok=True)
+    save_path = os.path.join(UPLOAD_SIGS, filename)
+    with open(save_path, 'wb') as f:
+        f.write(signature)
+
+    sig_id = run_async(dc.sign_document(login, author, doc_id, u_doc_id, save_path))
     return jsonify(sig_id=sig_id), 201
 
 @app.route('/sign/send/certificate', methods=['POST'])
 def upload_certificate():
-    login = request.form.get('login','')
-    cer_name = request.form.get('cer_name','')
+    login   = request.form.get('login','')
+
+    # 1) проверяем, есть ли уже сертификат у этого пользователя
+    existing = run_async(dc.get_user_certificates(login))
+    if existing:
+        return jsonify(error='certificate_exists'), 409
+
+    # 2) проверяем, что файл пришёл
     if 'certificate' not in request.files:
         return jsonify(error='no_file'), 400
+
+    # 3) сохраняем новый сертификат
     f = request.files['certificate']
     filename = secure_filename(f.filename)
-    path = os.path.join(UPLOAD_CERTS, filename)
-    f.save(path)
-    cer_id = run_async(dc.save_certificate(login, cer_name, path))
+    os.makedirs(UPLOAD_CERTS, exist_ok=True)
+    cer_path = os.path.join(UPLOAD_CERTS, filename)
+    f.save(cer_path)
+
+    # 4) записываем в БД
+    cer_id = run_async(dc.add_user_certificate(login, cer_path))
     return jsonify(certificate_id=cer_id), 201
 
 @app.route('/sign/verify', methods=['POST'])

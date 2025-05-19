@@ -310,11 +310,10 @@ class DCWorker:
 
     # операции
     async def _op_add_cert(self, c, t):
-        dst = self._encrypt_and_store(t.payload["cert_path"], DIR_CERTS)
         name = Path(t.payload["cert_path"]).name
         cur = await asyncio.to_thread(c.execute,
             "INSERT INTO certificates(login,cer_name,cer_path) VALUES(?,?,?)",
-            (t.payload["login"], name, dst))
+            (t.payload["login"], name, t.payload["cert_path"]))
         await asyncio.to_thread(c.commit)
         t.fut.set_result(cur.lastrowid)
 
@@ -385,31 +384,55 @@ class DCWorker:
         task.fut.set_result(cur.lastrowid)
 
     async def _op_upd_doc(self, c, t):
-        # сохранение предыдущей версии
+        login   = t.payload.get("login")
+        doc_id  = t.payload.get("doc_id")
+        new_name    = t.payload.get("new_name")      # вместо new_name
+        new_content = t.payload.get("new_content")   # вместо new_content
+        new_status  = t.payload.get("new_status")
+
+        # 1) сохраняем предыдущую версию
         row = await asyncio.to_thread(
             lambda: c.execute(
-                "SELECT doc_name, content, edited_date FROM documents WHERE login=? AND doc_id=?",
-                (t.payload["login"], t.payload["doc_id"])
+                "SELECT doc_name, content, edited_date "
+                "FROM documents WHERE login=? AND doc_id=?",
+                (login, doc_id)
             ).fetchone()
         )
         if row:
             prev_name, prev_content, prev_date = row
             await asyncio.to_thread(c.execute,
-                "INSERT INTO document_versions(doc_id,version_date,doc_name,content) VALUES(?,?,?,?)",
-                (t.payload["doc_id"], prev_date, prev_name, prev_content)
+                "INSERT INTO document_versions(doc_id, version_date, doc_name, content) "
+                "VALUES(?,?,?,?)",
+                (doc_id, prev_date, prev_name, prev_content)
             )
 
+        # 2) готовим UPDATE
         sets, params = [], []
-        if t.payload["new_name"]:
-            sets.append("doc_name=?"); params.append(t.payload["new_name"])
-        if t.payload["new_content"]:
-            sets.append("content=?"); params.append(t.payload["new_content"])
+        if new_name is not None:
+            sets.append("doc_name=?")
+            params.append(new_name)
+        if new_content is not None:
+            sets.append("content=?")
+            params.append(new_content)
+        if new_status is not None:
+            sets.append("status=?")
+            params.append(new_status)
+
         if sets:
-            params.extend((datetime.datetime.utcnow().isoformat(),
-                           t.payload["login"], t.payload["doc_id"]))
-            sql = "UPDATE documents SET " + ", ".join(sets) + ",edited_date=? WHERE login=? AND doc_id=?"
+            # добавляем edited_date
+            sets.append("edited_date=?")
+            params.append(datetime.datetime.utcnow().isoformat())
+            # WHERE
+            params.extend((login, doc_id))
+
+            sql = (
+                "UPDATE documents "
+                "SET " + ", ".join(sets) + " "
+                "WHERE login=? AND doc_id=?"
+            )
             await asyncio.to_thread(c.execute, sql, params)
             await asyncio.to_thread(c.commit)
+
         t.fut.set_result(True)
 
     async def _op_upd_u_doc(self, c, t):
@@ -630,13 +653,11 @@ class DCWorker:
         )
         # получаем все строки
         rows = await asyncio.to_thread(cur.fetchall)
-        print(f"[DEBUG] Rows fetched: {rows!r}")
         # строим результат
         res = {r[0]: {'name': r[1], 'contact': r[2]} for r in rows}
         t.fut.set_result(res)
 
     async def _op_remove_contact(self, c, t):
-        print(f"[DEBUG] Getting contacts for login={t.payload["login"],!r}")
         await asyncio.to_thread(c.execute,
             "DELETE FROM contacts WHERE login=? AND con_id=?",
             (t.payload["login"], t.payload["con_id"]))
