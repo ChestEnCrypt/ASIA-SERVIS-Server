@@ -97,7 +97,7 @@ class DCProducer:
         return await self._call("create_doc", login=login)
 
     async def add_document_file(self, login: str, name: str, doc_id: int, file_path: str) -> int:
-        return await self._call("add_u_doc", login=login, name=name,
+        return await self._call("add_u_doc", login=login, u_doc_name=name,
                                 doc_id=doc_id, file_path=file_path)
 
     async def add_subdocument(self, login: str, doc_id: int,
@@ -357,7 +357,7 @@ class DCWorker:
     async def _op_add_u_doc(self, c, t):
         dst = self._encrypt_and_store(t.payload["file_path"],
                                       DIR_DOCS / t.payload["login"] / str(t.payload["doc_id"]))
-        name = Path(t.payload["file_path"]).name
+        name = t.payload["u_doc_name"]
         cur = await asyncio.to_thread(c.execute,
             "INSERT INTO u_documents(doc_id,u_doc_name,u_doc_path) VALUES(?,?,?)",
             (t.payload["doc_id"], name, dst))
@@ -538,13 +538,19 @@ class DCWorker:
         t.fut.set_result(cur.lastrowid)
 
     async def _op_get_signs(self, c, t):
+
+        # гарантия, что параметр author — строка, а не dict
+        author_param = t.payload.get("author")
+        if isinstance(author_param, dict):
+            author_param = author_param.get("login")
         cur = await asyncio.to_thread(c.execute,
             "SELECT sig_id,login,sign_path FROM signatures WHERE u_doc_id IN "
             "(SELECT u_doc_id FROM u_documents WHERE doc_id=? AND login=?)",
-            (t.payload["doc_id"], t.payload["author"]))
+            (t.payload["doc_id"], author_param))
         rows = cur.fetchall()
         res = {r[0]: {"login": r[1], "sign_path": r[2]} for r in rows}
         t.fut.set_result(res)
+
 
     async def _op_verify_sign(self, c, t):
         cur = await asyncio.to_thread(c.execute,
@@ -581,27 +587,7 @@ class DCWorker:
     async def _op_get_inbox(self, c, t):
         login = t.payload.get('login', '')
 
-        # Сначала загружаем все документы пользователя
-        cur_docs = await asyncio.to_thread(
-            c.execute,
-            "SELECT doc_id, doc_name, content, create_date, edited_date, status "
-            "FROM documents WHERE login=?",
-            (login,)
-        )
-        doc_rows = await asyncio.to_thread(cur_docs.fetchall)
-        # Формируем словарь документов: {doc_id: {…}}
-        documents = {
-            r[0]: {
-                "doc_name":    r[1],
-                "content":     r[2],
-                "create_date": r[3],
-                "edited_date": r[4],
-                "status":      r[5],
-            }
-            for r in doc_rows
-        }
-
-        # Теперь получаем входящие
+        # Получаем все входящие для данного пользователя
         cur = await asyncio.to_thread(
             c.execute,
             "SELECT inb_id, author, doc_id, signed, archived FROM inbox WHERE login=?",
@@ -609,17 +595,35 @@ class DCWorker:
         )
         rows = await asyncio.to_thread(cur.fetchall)
 
-        # Собираем окончательный результат, включая вложенный документ
-        res = {
-            r[0]: {
-                "author":   r[1],
-                "doc_id":   r[2],
-                "signed":   bool(r[3]),
-                "archived": bool(r[4]),
-                "doc":      documents.get(r[2], {})
+        res = {}
+        for inb_id, author, doc_id, signed, archived in rows:
+            # Для каждого входящего запрашиваем документ по автору и doc_id
+            cur_doc = await asyncio.to_thread(
+                c.execute,
+                "SELECT doc_name, content, create_date, edited_date, status "
+                "FROM documents WHERE login=? AND doc_id=?",
+                (author, doc_id)
+            )
+            row = await asyncio.to_thread(cur_doc.fetchone)
+
+            if row:
+                doc = {
+                    "doc_name":    row[0],
+                    "content":     row[1],
+                    "create_date": row[2],
+                    "edited_date": row[3],
+                    "status":      row[4],
+                }
+            else:
+                doc = {}
+
+            res[inb_id] = {
+                "author":   author,
+                "doc_id":   doc_id,
+                "signed":   bool(signed),
+                "archived": bool(archived),
+                "doc":      doc
             }
-            for r in rows
-        }
 
         t.fut.set_result(res)
 

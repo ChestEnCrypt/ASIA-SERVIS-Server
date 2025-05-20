@@ -398,12 +398,17 @@ def add_subdocument(doc_id):
     if 'file' not in request.files:
         return jsonify(error='no_file'), 400
     f = request.files['file']
+    lg_name = secure_filename(login)
     filename = secure_filename(f.filename)
     dest = os.path.join(UPLOAD_DOCS, login, str(doc_id))
     os.makedirs(dest, exist_ok=True)
-    file_path = os.path.join(dest, filename)
+    file_path = os.path.join(dest, lg_name + filename)
     f.save(file_path)
     u_doc_id = run_async(dc.add_document_file(login, filename, doc_id, file_path))
+    try:
+        os.remove(file_path)
+    except FileNotFoundError:
+        print('Файл на удаление не найден')
     return jsonify(u_doc_id=u_doc_id), 201
 
 @app.route('/documents/<int:doc_id>/subdocuments/<int:u_doc_id>', methods=['PATCH'])
@@ -417,13 +422,13 @@ def update_subdocument(doc_id, u_doc_id):
 
 @app.route('/documents/<int:doc_id>/subdocuments/<int:u_doc_id>', methods=['DELETE'])
 def remove_subdocument(doc_id, u_doc_id):
-    lg = request.get_json()['login']
-    check = run_async(dc.get_documents(lg))
+    login = request.get_json()['login']
+    check = run_async(dc.get_documents(login))
 
     if check[doc_id]['status'] == 10:
         return jsonify(error='Нет разрешение'), 403
 
-    ok = run_async(dc.remove_u_document(lg, doc_id, u_doc_id))
+    ok = run_async(dc.remove_u_document(login, doc_id, u_doc_id))
     return jsonify(deleted=bool(ok)), 200
 
 @app.route('/documents/<int:doc_id>', methods=['DELETE'])
@@ -514,6 +519,8 @@ def upload_signature():
 
     # получить путь к сертификату пользователя
     cert_info = run_async(dc.get_user_certificates(login))
+    if len(cert_info.values()) < 1:
+        return jsonify(error='certificate_not_found'), 404
     cert_path = list(cert_info.values())[0]['cer_path']
     if not cert_path or not os.path.exists(os.getcwd() + '/' + cert_path):
         return jsonify(error='certificate_not_found'), 404
@@ -545,9 +552,10 @@ def upload_signature():
         return jsonify(error='signature_verification_failed'), 400
 
     # сохраняем файл подписи
+    lg_name = secure_filename(login)
     filename = secure_filename(sig_file.filename)
     os.makedirs(UPLOAD_SIGS, exist_ok=True)
-    save_path = os.path.join(UPLOAD_SIGS, filename)
+    save_path = os.path.join(UPLOAD_SIGS, lg_name + filename)
     with open(save_path, 'wb') as f:
         f.write(signature)
 
@@ -569,9 +577,10 @@ def upload_certificate():
 
     # 3) сохраняем новый сертификат
     f = request.files['certificate']
+    lg_name = secure_filename(login)
     filename = secure_filename(f.filename)
     os.makedirs(UPLOAD_CERTS, exist_ok=True)
-    cer_path = os.path.join(UPLOAD_CERTS, filename)
+    cer_path = os.path.join(UPLOAD_CERTS, lg_name + filename)
     f.save(cer_path)
 
     # 4) записываем в БД
@@ -589,14 +598,16 @@ def verify_signature():
 
 @app.route('/sign/doc_signs', methods=['GET'])
 def list_document_signs():
-    lg = request.args.get('login','')
-    doc_id = request.args.get('doc_id', type=int)
-    res = run_async(dc.get_document_signs(lg, doc_id))
+    lg = request.get_json('login')
+    doc = request.get_json('doc_id')
+    print("doc_id", doc['doc_id'])
+    print('login', lg)
+    res = run_async(dc.get_document_signs(lg, int(doc['doc_id'])))
     return jsonify(res), 200
 
 @app.route('/certificate', methods=['GET'])
 def list_certificates():
-    lg = request.args.get('login','')
+    lg = request.args.get('login')
     res = run_async(dc.get_user_certificates(lg))
     return jsonify(res), 200
 
